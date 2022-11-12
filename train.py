@@ -11,9 +11,10 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # device = 'cpu'
 
 def train_model():
-    batch_size = 64
+    batch_size = 128
     max_len = 128
     pretrained_model = 'bert-base-uncased'
+    # pretrained_model = "emilyalsentzer/Bio_ClinicalBERT" 
     X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv")
     tokenizer = transformers.BertTokenizer.from_pretrained(pretrained_model,
                                                            do_lower_case=True, truncation=True, 
@@ -29,7 +30,6 @@ def train_model():
     test_loader = torch.utils.data.DataLoader(test_dataset, len(test_dataset),
                                                shuffle=True, num_workers=1)
     
-    # pretrained_model = "emilyalsentzer/Bio_ClinicalBERT" 
     model = BertPretrained(pretrained_model)
     model = model.to(device)
     
