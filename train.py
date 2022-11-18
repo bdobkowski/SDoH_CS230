@@ -6,6 +6,8 @@ import torch
 from model.model import BertPretrained
 import mlvt
 import tqdm
+import matplotlib.pyplot as plt
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, confusion_matrix
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # device = 'cpu'
@@ -93,6 +95,17 @@ def train_model():
         num_examples = len(targets)
         pred = torch.round(Y_hat).squeeze()
         num_right = sum(pred == targets)
+        conf_matrix = confusion_matrix(y_true=targets.cpu().detach().numpy(), y_pred=pred.cpu().detach().numpy())
+        fig, ax = plt.subplots(figsize=(5, 5))
+        ax.matshow(conf_matrix, cmap=plt.cm.Oranges, alpha=0.3)
+        for i in range(conf_matrix.shape[0]):
+            for j in range(conf_matrix.shape[1]):
+                ax.text(x=j, y=i,s=conf_matrix[i, j], va='center', ha='center', size='xx-large')
+        
+        plt.xlabel('Predictions', fontsize=18)
+        plt.ylabel('Actual', fontsize=18)
+        plt.title('Confusion Matrix', fontsize=18)
+        plt.savefig('conf_mat.png', dpi=300)
         d = num_examples - num_right
         diff += d
         tot += num_examples
