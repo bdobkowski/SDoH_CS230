@@ -7,28 +7,65 @@ from model.model import BertPretrained
 import mlvt
 import tqdm
 import matplotlib.pyplot as plt
-from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, confusion_matrix
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, confusion_matrix, roc_curve, roc_auc_score
 import numpy as np
+import ray
+import os
+from ray import tune
+import sys
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# os.environ['CUDA_VISIBLE_DEVICES'] = 0
 # device = 'cpu'
 
-NUM_EPOCHS = 100
+if len(sys.argv) > 1:
+    run_weak_labels = True if sys.argv[1] == "weak" else False
+else:
+    run_weak_labels = False
 
-def train_model():
-    batch_size = 128
-    max_len = 128
+NUM_EPOCHS     = 50
+weak_label_words = ['bacs','wesley','melanoma','burned', 'prison']
+
+config = {
+    "optimizer": tune.grid_search([torch.optim.Adam, torch.optim.SGD]),
+    "lr": tune.grid_search([1e-4, 1e-3, 1e-2]),
+    "prob_threshold": tune.grid_search([0.5, 0.6]),
+    "batch_size": tune.grid_search([128, 256]),
+    "max_len": tune.grid_search([128, 256])
+}
+
+# config = {
+#     "optimizer": tune.grid_search([torch.optim.Adam]),
+#     "lr": tune.grid_search([1e-4]),
+#     "prob_threshold": tune.grid_search([0.5]),
+#     "batch_size": tune.grid_search([128]),
+#     "max_len": tune.grid_search([128, 256])
+# }
+
+def train_model(config):
+    tune.utils.wait_for_gpu()
+    batch_size = config["batch_size"]
+    max_len = config["max_len"]
     pretrained_model = 'bert-base-uncased'
+
     # pretrained_model = "emilyalsentzer/Bio_ClinicalBERT" 
 
     # X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv")
     # X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv",
     #                                              unstructured_data="data/unstructured_data.csv") # weak labeling
-    X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv",
-                                                 unstructured_data="data/raw_weak_labels.csv") # weak labeling                    
-    print(f'number training examples: {len(X_train)}')
-    print(f'number of labels: {len(y_train)}')
-    print(f'number positive training labels: {np.sum(y_train)}')
+    # X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv",
+    #                                              unstructured_data="data/raw_weak_labels.csv") # weak labeling 
+    if not run_weak_labels:
+        print('Running supervised learning')
+        X_train, X_test, y_train, y_test = load_data("/home/ubuntu/SDoH_CS230/data/final_foodinsecurity_data.csv") # weak labeling 
+    else:
+        print('Running weak labeling')
+        X_train, X_test, y_train, y_test = load_data("/home/ubuntu/SDoH_CS230/data/final_foodinsecurity_data.csv",
+                                                      unstructured_data="/home/ubuntu/SDoH_CS230/data/raw_weak_labels.csv",
+                                                      weak_label_words=weak_label_words)
+    # print(f'number training examples: {len(X_train)}')
+    # print(f'number of labels: {len(y_train)}')
+    # print(f'number positive training labels: {np.sum(y_train)}')
     tokenizer = transformers.BertTokenizer.from_pretrained(pretrained_model,
                                                            do_lower_case=True, truncation=True, 
                                                            padding='True', pad_to_max_length=True,
@@ -44,7 +81,7 @@ def train_model():
                                                shuffle=True, num_workers=1)
     
     model = BertPretrained(pretrained_model)
-    model = model.to(device)
+    model = model.to(device) 
     
     # Freeze pretrained model params
     for param in model.parameters():
@@ -55,43 +92,60 @@ def train_model():
         # param.requires_grad = True
     
     # optimizer = torch.optim.Adam(model.parameters(), lr=5e-3)
-    optimizer = torch.optim.SGD(model.parameters(), lr=5e-4)
+    optimizer = config["optimizer"](model.parameters(), lr=config["lr"])
     # This loss function applies sigmoid to output first to constrain between 0 and 1
     loss = torch.nn.BCEWithLogitsLoss()
     # loss = torch.nn.CrossEntropyLoss()
     # loss = torch.nn.MSELoss()
     
-    t = tqdm.trange(NUM_EPOCHS, leave=True)
-    rp = mlvt.Reprint()
-    loss_plot = mlvt.Line(NUM_EPOCHS, 20, accumulate=NUM_EPOCHS, color="bright_green")
+    # t = tqdm.trange(NUM_EPOCHS, leave=True)
+    t = range(NUM_EPOCHS)
+    # rp = mlvt.Reprint()
+    # loss_plot = mlvt.Line(NUM_EPOCHS, 20, accumulate=NUM_EPOCHS, color="bright_green")
     model.train()
+    decayRate = 0.96
+    my_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optimizer, gamma=decayRate)
     # loader = DataLoader(train_dataset, batch_size=batch, sampler=sampler, num_workers=16, pin_memory=True)
     for epoch in t:
-        correct = 0
-        total = 0
+        correct = 0.0
+        total = 0.0
         for i, batch in enumerate(train_loader):
             ids = torch.as_tensor(batch['input_ids'], dtype=torch.long).clone().detach()
             masks = torch.as_tensor(batch['attention_mask'], dtype=torch.long).clone().detach()
             token_type_ids = torch.as_tensor(batch['token_type_ids'], dtype=torch.long).clone().detach()
             targets = torch.as_tensor(batch['targets']).clone().detach()
             targets = targets.unsqueeze(1)
+
             # print(torch.unique(targets))
             ids, masks, token_type_ids, targets = ids.to(device), masks.to(device), token_type_ids.to(device), targets.to(device)
             
             optimizer.zero_grad()
             Y_hat = model(ids, masks, token_type_ids)
+
+            # pred = torch.sigmoid(Y_hat).squeeze().cpu().detach().numpy()
+            # pred[pred>=config["prob_threshold"]] = 1
+            # pred[pred<config["prob_threshold"]] = 0
+
+            # print(pred)
+            # print(targets)
+            # correct += np.sum(pred == targets.squeeze(1))
+            # print(correct)
+            
+            total += len(targets)
             # print(Y_hat)
             # print(targets)
             l = loss(Y_hat, targets)
             l.backward()
             optimizer.step()
-            t.set_description(f"loss: {l.item():.3e} epoch: {epoch}")
-            if i % 100 == 0:
-                loss_plot.update(l.item())
-                rp.print(loss_plot)
-                rp.flush()
+            # t.set_description(f"loss: {l.item():.3e} epoch: {epoch}")
+            # if i % 100 == 0:
+            #     loss_plot.update(l.item())
+            #     rp.print(loss_plot)
+            #     rp.flush()
+        # print("Train accuracy: ", correct / total)
+        my_lr_scheduler.step()
                 
-    torch.save(model.state_dict(), "chkpoint.pt")
+    # torch.save(model.state_dict(), "chkpoint.pt")
     model.eval()
     diff = 0
     tot = 0
@@ -105,10 +159,16 @@ def train_model():
         ids, masks, token_type_ids, targets = ids.to(device), masks.to(device), token_type_ids.to(device), targets.to(device)
         Y_hat = model(ids, masks, token_type_ids)
         num_examples = len(targets)
-        pred = torch.round(torch.sigmoid(Y_hat)).squeeze()
-        num_right = sum(pred == targets)
+        # pred = torch.round(torch.sigmoid(Y_hat)).squeeze().cpu().detach().numpy()
+        pred = torch.sigmoid(Y_hat).squeeze().cpu().detach().numpy()
+        pred[pred>=config["prob_threshold"]] = 1
+        pred[pred<config["prob_threshold"]] = 0
+        targ = targets.cpu().detach().numpy().astype(int)
+        num_right = np.sum(pred.astype(int) == targets)
         
-        metrics_dict = calculate_metrics(targets.cpu().detach().numpy(), pred.cpu().detach().numpy())
+        metrics_dict = calculate_metrics(targ, pred)
+
+        tune.report(score=metrics_dict['f1'])
         
         fig, ax = plt.subplots(figsize=(5, 5))
         ax.matshow(metrics_dict['conf_matrix'], cmap=plt.cm.Oranges, alpha=0.3)
@@ -123,24 +183,45 @@ def train_model():
         d = num_examples - num_right
         diff += d
         tot += num_examples
-        print(f"{(tot - diff) / tot * 100}% accuracy on test ({diff} wrong of {tot})")
+        # print(f"{(tot - diff) / tot * 100}% accuracy on test ({diff} wrong of {tot})")
 
 def calculate_metrics(targets, pred):
     metrics = {}
-    print(targets)
-    print(pred)
-    print(targets - pred)
+    # print(targets)
+    # print(pred)
+    # print(targets - pred)
     metrics['conf_matrix'] = confusion_matrix(y_true=targets, y_pred=pred)
     metrics['precision']   = precision_score(targets, pred)
     metrics['recall']      = recall_score(targets, pred)
     metrics['f1']          = f1_score(targets, pred)
     metrics['accuracy']    = accuracy_score(targets, pred)
+    metrics['roc_curve']   = roc_curve(targets, pred)
+    metrics['auroc']       = roc_auc_score(targets, pred)
 
     print(repr(metrics))
 
     return metrics
-        
-                
-train_model()
+
+if __name__ == "__main__":
+
+    one_config = {
+        "lr": 5e-4,
+        "batch_size": 128,
+        "prob_threshold": 0.5,
+        "optimizer": torch.optim.Adam,
+        "max_len": 128
+    }
+
+    ray.init(num_gpus=1)
+
+    # train_model(one_config)
+                    
+    analysis = tune.run(train_model, config=config, resources_per_trial={"cpu": 8, "gpu": 1})
+    # train_model(config)
+    print("Best config: ", analysis.get_best_config(metric="score", mode="max"))
+    print("Best metric: ", analysis.get_best_trial(metric="score", mode="max"))
+
+    df = analysis.dataframe()
+    print(df)
     
     
