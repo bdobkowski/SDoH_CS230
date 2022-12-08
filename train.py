@@ -8,16 +8,27 @@ import mlvt
 import tqdm
 import matplotlib.pyplot as plt
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, confusion_matrix
+import numpy as np
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # device = 'cpu'
+
+NUM_EPOCHS = 100
 
 def train_model():
     batch_size = 128
     max_len = 128
     pretrained_model = 'bert-base-uncased'
     # pretrained_model = "emilyalsentzer/Bio_ClinicalBERT" 
-    X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv")
+
+    # X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv")
+    # X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv",
+    #                                              unstructured_data="data/unstructured_data.csv") # weak labeling
+    X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv",
+                                                 unstructured_data="data/raw_weak_labels.csv") # weak labeling                    
+    print(f'number training examples: {len(X_train)}')
+    print(f'number of labels: {len(y_train)}')
+    print(f'number positive training labels: {np.sum(y_train)}')
     tokenizer = transformers.BertTokenizer.from_pretrained(pretrained_model,
                                                            do_lower_case=True, truncation=True, 
                                                            padding='True', pad_to_max_length=True,
@@ -43,15 +54,16 @@ def train_model():
     # for param in model.out_activation.parameters():
         # param.requires_grad = True
     
+    # optimizer = torch.optim.Adam(model.parameters(), lr=5e-3)
     optimizer = torch.optim.SGD(model.parameters(), lr=5e-4)
     # This loss function applies sigmoid to output first to constrain between 0 and 1
     loss = torch.nn.BCEWithLogitsLoss()
     # loss = torch.nn.CrossEntropyLoss()
     # loss = torch.nn.MSELoss()
     
-    t = tqdm.trange(100, leave=True)
+    t = tqdm.trange(NUM_EPOCHS, leave=True)
     rp = mlvt.Reprint()
-    loss_plot = mlvt.Line(100, 20, accumulate=100, color="bright_green")
+    loss_plot = mlvt.Line(NUM_EPOCHS, 20, accumulate=NUM_EPOCHS, color="bright_green")
     model.train()
     # loader = DataLoader(train_dataset, batch_size=batch, sampler=sampler, num_workers=16, pin_memory=True)
     for epoch in t:
@@ -93,14 +105,16 @@ def train_model():
         ids, masks, token_type_ids, targets = ids.to(device), masks.to(device), token_type_ids.to(device), targets.to(device)
         Y_hat = model(ids, masks, token_type_ids)
         num_examples = len(targets)
-        pred = torch.round(Y_hat).squeeze()
+        pred = torch.round(torch.sigmoid(Y_hat)).squeeze()
         num_right = sum(pred == targets)
-        conf_matrix = confusion_matrix(y_true=targets.cpu().detach().numpy(), y_pred=pred.cpu().detach().numpy())
+        
+        metrics_dict = calculate_metrics(targets.cpu().detach().numpy(), pred.cpu().detach().numpy())
+        
         fig, ax = plt.subplots(figsize=(5, 5))
-        ax.matshow(conf_matrix, cmap=plt.cm.Oranges, alpha=0.3)
-        for i in range(conf_matrix.shape[0]):
-            for j in range(conf_matrix.shape[1]):
-                ax.text(x=j, y=i,s=conf_matrix[i, j], va='center', ha='center', size='xx-large')
+        ax.matshow(metrics_dict['conf_matrix'], cmap=plt.cm.Oranges, alpha=0.3)
+        for i in range(metrics_dict['conf_matrix'].shape[0]):
+            for j in range(metrics_dict['conf_matrix'].shape[1]):
+                ax.text(x=j, y=i,s=metrics_dict['conf_matrix'][i, j], va='center', ha='center', size='xx-large')
         
         plt.xlabel('Predictions', fontsize=18)
         plt.ylabel('Actual', fontsize=18)
@@ -110,6 +124,21 @@ def train_model():
         diff += d
         tot += num_examples
         print(f"{(tot - diff) / tot * 100}% accuracy on test ({diff} wrong of {tot})")
+
+def calculate_metrics(targets, pred):
+    metrics = {}
+    print(targets)
+    print(pred)
+    print(targets - pred)
+    metrics['conf_matrix'] = confusion_matrix(y_true=targets, y_pred=pred)
+    metrics['precision']   = precision_score(targets, pred)
+    metrics['recall']      = recall_score(targets, pred)
+    metrics['f1']          = f1_score(targets, pred)
+    metrics['accuracy']    = accuracy_score(targets, pred)
+
+    print(repr(metrics))
+
+    return metrics
         
                 
 train_model()
