@@ -26,6 +26,7 @@ else:
 NUM_EPOCHS     = 50
 weak_label_words = ['bacs','wesley','melanoma','burned', 'prison']
 
+# Config for hyperparameter tuning
 config = {
     "optimizer": tune.grid_search([torch.optim.Adam, torch.optim.SGD]),
     "lr": tune.grid_search([1e-4, 1e-3, 1e-2]),
@@ -33,14 +34,6 @@ config = {
     "batch_size": tune.grid_search([128, 256]),
     "max_len": tune.grid_search([128, 256])
 }
-
-# config = {
-#     "optimizer": tune.grid_search([torch.optim.Adam]),
-#     "lr": tune.grid_search([1e-4]),
-#     "prob_threshold": tune.grid_search([0.5]),
-#     "batch_size": tune.grid_search([128]),
-#     "max_len": tune.grid_search([128, 256])
-# }
 
 def train_model(config, modelname, labeling):
     # tune.utils.wait_for_gpu()
@@ -86,7 +79,6 @@ def train_model(config, modelname, labeling):
     # for param in model.out_activation.parameters():
         # param.requires_grad = True
     
-    # optimizer = torch.optim.Adam(model.parameters(), lr=5e-3)
     optimizer = config["optimizer"](model.parameters(), lr=config["lr"])
     # This loss function applies sigmoid to output first to constrain between 0 and 1
     loss = torch.nn.BCEWithLogitsLoss()
