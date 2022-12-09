@@ -42,27 +42,22 @@ config = {
 #     "max_len": tune.grid_search([128, 256])
 # }
 
-def train_model(config):
-    tune.utils.wait_for_gpu()
+def train_model(config, modelname, labeling):
+    # tune.utils.wait_for_gpu()
     batch_size = config["batch_size"]
     max_len = config["max_len"]
-    pretrained_model = 'bert-base-uncased'
+    pretrained_model = modelname
 
-    # pretrained_model = "emilyalsentzer/Bio_ClinicalBERT" 
-
-    # X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv")
-    # X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv",
-    #                                              unstructured_data="data/unstructured_data.csv") # weak labeling
-    # X_train, X_test, y_train, y_test = load_data("data/food_insecurity_labels_v2.csv",
-    #                                              unstructured_data="data/raw_weak_labels.csv") # weak labeling 
-    if not run_weak_labels:
+    if labeling == "supervised":
         print('Running supervised learning')
         X_train, X_test, y_train, y_test = load_data("/home/ubuntu/SDoH_CS230/data/final_foodinsecurity_data.csv") # weak labeling 
-    else:
+    elif labeling == "weak":
         print('Running weak labeling')
         X_train, X_test, y_train, y_test = load_data("/home/ubuntu/SDoH_CS230/data/final_foodinsecurity_data.csv",
                                                       unstructured_data="/home/ubuntu/SDoH_CS230/data/raw_weak_labels.csv",
                                                       weak_label_words=weak_label_words)
+    else:
+        raise Exception('No such labeling technique - see main function of train.py')
     # print(f'number training examples: {len(X_train)}')
     # print(f'number of labels: {len(y_train)}')
     # print(f'number positive training labels: {np.sum(y_train)}')
@@ -122,18 +117,14 @@ def train_model(config):
             optimizer.zero_grad()
             Y_hat = model(ids, masks, token_type_ids)
 
-            # pred = torch.sigmoid(Y_hat).squeeze().cpu().detach().numpy()
-            # pred[pred>=config["prob_threshold"]] = 1
-            # pred[pred<config["prob_threshold"]] = 0
+            with torch.no_grad():
+                pred = torch.sigmoid(Y_hat).squeeze().cpu().detach().numpy()
+                pred[pred>=config["prob_threshold"]] = 1
+                pred[pred<config["prob_threshold"]] = 0
+                correct += np.sum(pred == targets.cpu().numpy().squeeze())                
+                total += len(targets)
+                train_accuracy = correct / total
 
-            # print(pred)
-            # print(targets)
-            # correct += np.sum(pred == targets.squeeze(1))
-            # print(correct)
-            
-            total += len(targets)
-            # print(Y_hat)
-            # print(targets)
             l = loss(Y_hat, targets)
             l.backward()
             optimizer.step()
@@ -142,7 +133,9 @@ def train_model(config):
             #     loss_plot.update(l.item())
             #     rp.print(loss_plot)
             #     rp.flush()
-        # print("Train accuracy: ", correct / total)
+        if epoch % 10 == 0:
+            print(f'{epoch} Epochs Trained')
+        print("Train accuracy: ", train_accuracy)
         my_lr_scheduler.step()
                 
     # torch.save(model.state_dict(), "chkpoint.pt")
@@ -166,37 +159,26 @@ def train_model(config):
         targ = targets.cpu().detach().numpy().astype(int)
         num_right = np.sum(pred.astype(int) == targets)
         
-        metrics_dict = calculate_metrics(targ, pred)
+        metrics_dict = calculate_metrics(targ, pred, torch.sigmoid(Y_hat).squeeze().cpu().detach().numpy())
 
-        tune.report(score=metrics_dict['f1'])
+        # tune.report(score=metrics_dict['f1'])
         
-        fig, ax = plt.subplots(figsize=(5, 5))
-        ax.matshow(metrics_dict['conf_matrix'], cmap=plt.cm.Oranges, alpha=0.3)
-        for i in range(metrics_dict['conf_matrix'].shape[0]):
-            for j in range(metrics_dict['conf_matrix'].shape[1]):
-                ax.text(x=j, y=i,s=metrics_dict['conf_matrix'][i, j], va='center', ha='center', size='xx-large')
-        
-        plt.xlabel('Predictions', fontsize=18)
-        plt.ylabel('Actual', fontsize=18)
-        plt.title('Confusion Matrix', fontsize=18)
-        plt.savefig('conf_mat.png', dpi=300)
         d = num_examples - num_right
         diff += d
         tot += num_examples
         # print(f"{(tot - diff) / tot * 100}% accuracy on test ({diff} wrong of {tot})")
 
-def calculate_metrics(targets, pred):
+    return metrics_dict, train_accuracy
+
+def calculate_metrics(targets, pred, pred_not_int):
     metrics = {}
-    # print(targets)
-    # print(pred)
-    # print(targets - pred)
     metrics['conf_matrix'] = confusion_matrix(y_true=targets, y_pred=pred)
     metrics['precision']   = precision_score(targets, pred)
     metrics['recall']      = recall_score(targets, pred)
     metrics['f1']          = f1_score(targets, pred)
     metrics['accuracy']    = accuracy_score(targets, pred)
-    metrics['roc_curve']   = roc_curve(targets, pred)
-    metrics['auroc']       = roc_auc_score(targets, pred)
+    metrics['roc_curve']   = roc_curve(targets, pred_not_int)
+    metrics['auroc']       = roc_auc_score(targets, pred_not_int)
 
     print(repr(metrics))
 
@@ -205,23 +187,64 @@ def calculate_metrics(targets, pred):
 if __name__ == "__main__":
 
     one_config = {
-        "lr": 5e-4,
-        "batch_size": 128,
+        "lr": 1e-3,
+        "batch_size": 256,
         "prob_threshold": 0.5,
         "optimizer": torch.optim.Adam,
-        "max_len": 128
+        "max_len": 256,
     }
 
-    ray.init(num_gpus=1)
+    # ray.init(num_gpus=1)
 
-    # train_model(one_config)
+    metrics = {}
+    train_acc = {}
+
+    fig, ax = plt.subplots()
+
+    names = ['BERT_Supervised', 'BERT_Weak', 'ClinicalBERT_Supervised', 'ClinincalBERT_Weak']
+
+    for i, model in enumerate(["bert-base-uncased", "emilyalsentzer/Bio_ClinicalBERT"]):
+        for j, labeling in enumerate(["supervised", "weak"]):
+            print(f'Running {names[2*i+j]}')
+            if labeling == "weak":
+                config = {"lr": 1e-2, 
+                "batch_size": 128,
+                "prob_threshold": 0.6,
+                "optimizer": torch.optim.Adam,
+                "max_len": 256}
+            else:
+                config = one_config
+
+            metrics[names[2*i+j]], train_acc[names[2*i+j]] = train_model(config, model, labeling)
+
+            ax.plot(metrics[names[2*i+j]]['roc_curve'][0], metrics[names[2*i+j]]['roc_curve'][1], label=names[2*i+j])
+            ax.set_xlabel('FP Rate')
+            ax.set_ylabel('TP Rate')
+            ax.legend()
+
+            fig1, ax1 = plt.subplots(figsize=(5, 5))
+            ax1.matshow(metrics[names[2*i+j]]['conf_matrix'], cmap=plt.cm.Oranges, alpha=0.3)
+            for ii in range(metrics[names[2*i+j]]['conf_matrix'].shape[0]):
+                for jj in range(metrics[names[2*i+j]]['conf_matrix'].shape[1]):
+                    ax1.text(x=jj, y=ii,s=metrics[names[2*i+j]]['conf_matrix'][ii, jj], va='center', ha='center', size='xx-large')
+            
+            ax1.set_xlabel('Predictions', fontsize=18)
+            ax1.set_ylabel('Actual', fontsize=18)
+            ax1.set_title('Confusion Matrix', fontsize=18)
+            fig1.savefig('conf_mat'+'_'+names[2*i+j]+'.png', dpi=300)
+
+    fig.savefig('roc_curve.png')
+
+    for key in names:
+        print('============================================\n\n\n\n')
+        print(key+ '\n\n\n')
+        print(metrics[key])
                     
-    analysis = tune.run(train_model, config=config, resources_per_trial={"cpu": 8, "gpu": 1})
-    # train_model(config)
-    print("Best config: ", analysis.get_best_config(metric="score", mode="max"))
-    print("Best metric: ", analysis.get_best_trial(metric="score", mode="max"))
+    # analysis = tune.run(train_model, config=config, resources_per_trial={"cpu": 8, "gpu": 1})
+    # print("Best config: ", analysis.get_best_config(metric="score", mode="max"))
+    # print("Best metric: ", analysis.get_best_trial(metric="score", mode="max"))
 
-    df = analysis.dataframe()
-    print(df)
+    # df = analysis.dataframe()
+    # print(df)
     
     

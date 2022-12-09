@@ -61,16 +61,16 @@ def load_data_test(data_path, unstructured_data=None, weak_label_words=None, sto
 	# for row in axs:
 	# 	for ax in row:
 	# label = labels[i]
-	data = ' '.join(df.loc[df[y_column_name] == 0, 'text'])
+	data = ' '.join(df.loc[df[y_column_name] == 1, 'text'])
 	cloud = WordCloud(stopwords=stopwords, width=1000, height=1000).generate(data)
 	axs.axis('off')
-	axs.set_title("Food Insecurity Word Cloud - Negative")
+	# axs.set_title("Food Insecurity Word Cloud - Negative")
 	axs.imshow(cloud)
 
 	plt.tight_layout()
 	# plt.show()
 
-	plt.savefig("test_neg.png")
+	plt.savefig("test_pos.png")
  
 	# tokens = []
 	# for text, label in zip(texts, labels):
@@ -100,7 +100,7 @@ def load_data_test(data_path, unstructured_data=None, weak_label_words=None, sto
 	df_pos = pd.DataFrame(tfIdf_pos[0].T.todense(), index=tfIdfVectorizer.get_feature_names_out(), columns=["TF-IDF"])
 	df_pos = df_pos.sort_values('TF-IDF', ascending=False) 
 	# print(df_pos)
-	pos_words = list(df_pos.index) 
+	pos_words = list(df_pos.index)[0:100] 
  
 	# Save top negative words 
 	tfIdf_neg = tfIdfVectorizer.fit_transform(test.loc[test[y_column_name] == 0, 'text'])
@@ -109,7 +109,7 @@ def load_data_test(data_path, unstructured_data=None, weak_label_words=None, sto
 	neg_words = list(df_neg.index)
 	
 	# Delete words that are popular in both food insecure/ food secure patients 
-	pred_words = [value for value in pos_words if value not in neg_words]
+	pred_words = [value for value in pos_words if value not in neg_words[0:200]]
 	# print(pred_words) 
 	# print (df.head(50)) 
 
@@ -218,5 +218,7 @@ if __name__ == "__main__":
 	# unstructured_data="../data/raw_weak_labels.csv",
 	# weak_label_words=weak_label_words) 
 	X_train, X_test, y_train, y_test = load_data_test("../data/final_foodinsecurity_data.csv", stopwords=eng_stopwords)
+	sampler = weighted_sampler(torch.from_numpy(y_train.values))
+
 	
  
